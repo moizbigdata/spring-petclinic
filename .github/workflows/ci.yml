@@ -104,6 +104,32 @@ jobs:
     #       VERSION=$(./mvnw ${{ env.MAVEN_CLI_OPTS }} help:evaluate -Dexpression=project.version -q -DforceStdout)
     #       echo "version=${VERSION}-${{ github.run_number }}" >> $GITHUB_OUTPUT
     #     fi
+    - name: Generate application version (FIXED)
+      id: version
+      run: |
+        if [[ "${{ github.event_name }}" == "release" ]]; then
+          VERSION="${{ github.event.release.tag_name }}"
+          echo "Using release version: ${VERSION}"
+        else
+          # Get base version from POM
+          BASE_VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null || echo "1.0.0-SNAPSHOT")
+          
+          # Clean up the version (remove -SNAPSHOT if present)
+          CLEAN_VERSION=${BASE_VERSION%-SNAPSHOT}
+          
+          # Create version with build number
+          VERSION="${CLEAN_VERSION}-build${{ github.run_number }}"
+          echo "Generated version: ${VERSION}"
+        fi
+        
+        # Verify version is not empty
+        if [ -z "${VERSION}" ]; then
+          echo "ERROR: Version generation failed"
+          exit 1
+        fi
+        
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Final version set to: ${VERSION}"
 
     - name: Check deployment conditions
       id: check-deploy
