@@ -418,7 +418,7 @@ jobs:
        PROJECT_VERSION: ${{ needs.setup-validation.outputs.version }}
       run: |
         ./mvnw ${{ env.MAVEN_CLI_OPTS }} versions:set \
-          -DnewVersion="${ PROJECT_VERSION }" \
+          -DnewVersion=${{ needs.setup-validation.outputs.version }} \
           -DgenerateBackupPoms=false
 
     - name: Compile CSS resources
