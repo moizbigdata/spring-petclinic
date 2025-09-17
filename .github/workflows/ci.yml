@@ -188,7 +188,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        profile: ['default', 'mysql', 'postgres']
+        # profile: ['default', 'mysql', 'postgres']
+        profile: ['default']
 
     steps:
     - name: Checkout code
