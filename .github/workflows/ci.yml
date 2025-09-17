@@ -1,0 +1,840 @@
+name: Spring PetClinic CI/CD Pipeline
+
+on:
+  push:
+    branches: 
+      - main
+      - develop
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'readme/**'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests during build'
+        required: false
+        default: false
+        type: boolean
+      database_profile:
+        description: 'Database profile to use'
+        required: false
+        default: 'h2'
+        type: choice
+        options:
+          - h2
+          - mysql
+          - postgres
+      deploy_environment:
+        description: 'Deployment environment'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  MAVEN_OPTS: "-Xmx2048m -Xms512m"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
+  JAVA_VERSION: '17'
+  NODE_VERSION: '18.x'
+  REGISTRY_URL: 'ghcr.io'
+  APP_NAME: 'spring-petclinic'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # Job 1: Setup and Validation
+  setup-validation:
+    name: Setup & Validation
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+      version: ${{ steps.version.outputs.version }}
+      should-deploy: ${{ steps.check-deploy.outputs.deploy }}
+    
+    steps:
+    - name: Checkout Spring PetClinic
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Java JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Generate Maven cache key
+      id: cache-key
+      run: |
+        echo "key=petclinic-maven-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}" >> $GITHUB_OUTPUT
+
+    - name: Cache Maven dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ steps.cache-key.outputs.key }}
+        restore-keys: |
+          petclinic-maven-${{ runner.os }}-
+
+    - name: Validate PetClinic Maven setup
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} validate
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} dependency:tree
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} help:active-profiles
+
+    - name: Generate application version
+      id: version
+      run: |
+        if [[ "${{ github.event_name }}" == "release" ]]; then
+          echo "version=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+        else
+          VERSION=$(./mvnw ${{ env.MAVEN_CLI_OPTS }} help:evaluate -Dexpression=project.version -q -DforceStdout)
+          echo "version=${VERSION}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Check deployment conditions
+      id: check-deploy
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" || 
+              "${{ github.event_name }}" == "release" || 
+              "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "deploy=true" >> $GITHUB_OUTPUT
+        else
+          echo "deploy=false" >> $GITHUB_OUTPUT
+        fi
+
+  # Job 2: Code Quality Analysis
+  code-quality:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+    needs: setup-validation
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Restore Maven cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ needs.setup-validation.outputs.cache-key }}
+        restore-keys: |
+          petclinic-maven-${{ runner.os }}-
+
+    - name: Compile for analysis
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} clean compile test-compile
+
+    - name: Run Checkstyle analysis
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} checkstyle:checkstyle
+      continue-on-error: true
+
+    - name: Run SpotBugs analysis
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} spotbugs:spotbugs
+      continue-on-error: true
+
+    # - name: SonarCloud Scan
+    #   if: github.actor != 'dependabot[bot]' && secrets.SONAR_TOKEN != ''
+    #   run: |
+    #     ./mvnw ${{ env.MAVEN_CLI_OPTS }} verify sonar:sonar \
+    #       -Dsonar.projectKey=spring-petclinic_${{ github.event.repository.name }} \
+    #       -Dsonar.organization=${{ github.repository_owner }} \
+    #       -Dsonar.host.url=https://sonarcloud.io \
+    #       -Dsonar.token=${{ secrets.SONAR_TOKEN }} \
+    #       -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+    #   continue-on-error: true
+
+    # - name: Upload code analysis results
+    #   uses: actions/upload-artifact@v4
+    #   if: always()
+    #   with:
+    #     name: ${{ env.APP_NAME }}-code-analysis-${{ github.run_number }}
+    #     path: |
+    #       target/checkstyle-result.xml
+    #       target/spotbugsXml.xml
+    #       target/site/jacoco/
+    #     retention-days: 30
+
+  # Job 3: Unit Tests with Multiple Database Profiles
+  unit-tests:
+    name: Unit Tests (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    needs: setup-validation
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: ['default', 'mysql', 'postgres']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Restore Maven cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ needs.setup-validation.outputs.cache-key }}
+        restore-keys: |
+          petclinic-maven-${{ runner.os }}-
+
+    - name: Run unit tests with coverage
+      if: ${{ !inputs.skip_tests }}
+      run: |
+        if [ "${{ matrix.profile }}" == "default" ]; then
+          ./mvnw ${{ env.MAVEN_CLI_OPTS }} clean test \
+            -Djacoco.destFile=target/jacoco.exec \
+            -Dspring.profiles.active=test
+        else
+          ./mvnw ${{ env.MAVEN_CLI_OPTS }} clean test \
+            -Djacoco.destFile=target/jacoco.exec \
+            -Dspring.profiles.active=${{ matrix.profile }},test
+        fi
+
+    - name: Generate JaCoCo test report
+      if: always() && !inputs.skip_tests
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} jacoco:report
+
+    - name: Publish test results
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      if: always() && !inputs.skip_tests && matrix.profile == 'default'
+      with:
+        files: |
+          target/surefire-reports/**/*.xml
+        check_name: "Unit Test Results (${{ matrix.profile }})"
+        comment_mode: create new
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always() && !inputs.skip_tests
+      with:
+        name: ${{ env.APP_NAME }}-unit-tests-${{ matrix.profile }}-${{ github.run_number }}
+        path: |
+          target/surefire-reports/
+          target/site/jacoco/
+        retention-days: 30
+
+  # Job 4: Integration Tests with Real Databases
+  # integration-tests:
+  #   name: Integration Tests
+  #   runs-on: ubuntu-latest
+  #   needs: [setup-validation, unit-tests]
+  #   if: success() && !inputs.skip_tests
+    
+  #   services:
+  #     mysql:
+  #       image: mysql:8.0
+  #       env:
+  #         MYSQL_ROOT_PASSWORD: petclinic
+  #         MYSQL_DATABASE: petclinic
+  #         MYSQL_USER: petclinic
+  #         MYSQL_PASSWORD: petclinic
+  #       options: >-
+  #         --health-cmd="mysqladmin ping"
+  #         --health-interval=10s
+  #         --health-timeout=5s
+  #         --health-retries=3
+  #       ports:
+  #         - 3306:3306
+
+  #     postgres:
+  #       image: postgres:15
+  #       env:
+  #         POSTGRES_PASSWORD: petclinic
+  #         POSTGRES_USER: petclinic
+  #         POSTGRES_DB: petclinic
+  #       options: >-
+  #         --health-cmd pg_isready
+  #         --health-interval 10s
+  #         --health-timeout 5s
+  #         --health-retries 5
+  #       ports:
+  #         - 5432:5432
+
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
+
+  #   - name: Setup Java JDK
+  #     uses: actions/setup-java@v4
+  #     with:
+  #       java-version: ${{ env.JAVA_VERSION }}
+  #       distribution: 'temurin'
+  #       cache: maven
+
+  #   - name: Restore Maven cache
+  #     uses: actions/cache@v4
+  #     with:
+  #       path: ~/.m2/repository
+  #       key: ${{ needs.setup-validation.outputs.cache-key }}
+  #       restore-keys: |
+  #         petclinic-maven-${{ runner.os }}-
+
+  #   - name: Wait for databases to be ready
+  #     run: |
+  #       # Wait for MySQL
+  #       while ! mysqladmin ping -h localhost -P 3306 -u petclinic -ppetclinic --silent; do
+  #         echo 'Waiting for MySQL...'
+  #         sleep 2
+  #       done
+        
+  #       # Wait for PostgreSQL
+  #       while ! pg_isready -h localhost -p 5432; do
+  #         echo 'Waiting for PostgreSQL...'
+  #         sleep 2
+  #       done
+
+  #   - name: Run integration tests with H2
+  #     run: |
+  #       ./mvnw ${{ env.MAVEN_CLI_OPTS }} verify \
+  #         -Dspring.profiles.active=test \
+  #         -Dit.test="*IT,*IntegrationTest"
+
+  #   - name: Run integration tests with MySQL
+  #     run: |
+  #       ./mvnw ${{ env.MAVEN_CLI_OPTS }} verify \
+  #         -Dspring.profiles.active=mysql,test \
+  #         -Dspring.datasource.url=jdbc:mysql://localhost:3306/petclinic \
+  #         -Dspring.datasource.username=petclinic \
+  #         -Dspring.datasource.password=petclinic \
+  #         -Dit.test="*IT,*IntegrationTest"
+
+  #   - name: Run integration tests with PostgreSQL
+  #     run: |
+  #       ./mvnw ${{ env.MAVEN_CLI_OPTS }} verify \
+  #         -Dspring.profiles.active=postgres,test \
+  #         -Dspring.datasource.url=jdbc:postgresql://localhost:5432/petclinic \
+  #         -Dspring.datasource.username=petclinic \
+  #         -Dspring.datasource.password=petclinic \
+  #         -Dit.test="*IT,*IntegrationTest"
+
+  #   - name: Upload integration test results
+  #     uses: actions/upload-artifact@v4
+  #     if: always()
+  #     with:
+  #       name: ${{ env.APP_NAME }}-integration-tests-${{ github.run_number }}
+  #       path: |
+  #         target/failsafe-reports/
+  #         target/site/jacoco-it/
+  #       retention-days: 30
+
+  # Job 5: Build and Package
+  build-package:
+    name: Build & Package
+    runs-on: ubuntu-latest
+    needs: [setup-validation, unit-tests]
+    if: success()
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Java JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Setup Node.js for CSS compilation
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Restore Maven cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.m2/repository
+        key: ${{ needs.setup-validation.outputs.cache-key }}
+        restore-keys: |
+          petclinic-maven-${{ runner.os }}-
+
+    - name: Set application version
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} versions:set \
+          -DnewVersion=${{ needs.setup-validation.outputs.version }} \
+          -DgenerateBackupPoms=false
+
+    - name: Compile CSS resources
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} generate-resources -P css
+
+    - name: Package Spring PetClinic
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} clean package \
+          -DskipTests=${{ inputs.skip_tests || 'false' }} \
+          -Dmaven.javadoc.skip=false
+
+    # - name: Build optimized Spring Boot container image
+    #   run: |
+    #     ./mvnw ${{ env.MAVEN_CLI_OPTS }} spring-boot:build-image \
+    #       -Dspring-boot.build-image.imageName=${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }}
+
+    - name: Create deployment package
+      run: |
+        mkdir -p deployment-package
+        
+        # Copy Spring Boot JAR
+        cp target/spring-petclinic-*.jar deployment-package/
+        
+        # Copy configuration files
+        [ -f "application.yml" ] && cp application.yml deployment-package/
+        [ -f "application.properties" ] && cp application.properties deployment-package/
+        [ -d "src/main/resources" ] && cp -r src/main/resources deployment-package/config
+        
+        # Copy database scripts
+        [ -d "src/main/resources/db" ] && cp -r src/main/resources/db deployment-package/
+        
+        # Create Docker Compose for different profiles
+        cat > deployment-package/docker-compose-mysql.yml << 'EOF'
+        version: '3.8'
+        services:
+          mysql:
+            image: mysql:8.0
+            environment:
+              MYSQL_ROOT_PASSWORD: petclinic
+              MYSQL_DATABASE: petclinic
+              MYSQL_USER: petclinic
+              MYSQL_PASSWORD: petclinic
+            ports:
+              - "3306:3306"
+            volumes:
+              - mysql_data:/var/lib/mysql
+          
+          petclinic:
+            image: ${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }}
+            environment:
+              SPRING_PROFILES_ACTIVE: mysql
+              SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/petclinic
+              SPRING_DATASOURCE_USERNAME: petclinic
+              SPRING_DATASOURCE_PASSWORD: petclinic
+            ports:
+              - "8080:8080"
+            depends_on:
+              - mysql
+        
+        volumes:
+          mysql_data:
+        EOF
+
+        cat > deployment-package/docker-compose-postgres.yml << 'EOF'
+        version: '3.8'
+        services:
+          postgres:
+            image: postgres:15
+            environment:
+              POSTGRES_DB: petclinic
+              POSTGRES_USER: petclinic
+              POSTGRES_PASSWORD: petclinic
+            ports:
+              - "5432:5432"
+            volumes:
+              - postgres_data:/var/lib/postgresql/data
+          
+          petclinic:
+            image: ${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }}
+            environment:
+              SPRING_PROFILES_ACTIVE: postgres
+              SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/petclinic
+              SPRING_DATASOURCE_USERNAME: petclinic
+              SPRING_DATASOURCE_PASSWORD: petclinic
+            ports:
+              - "8080:8080"
+            depends_on:
+              - postgres
+        
+        volumes:
+          postgres_data:
+        EOF
+
+        # Create Kubernetes manifests
+        mkdir -p deployment-package/k8s
+        cat > deployment-package/k8s/petclinic-deployment.yml << 'EOF'
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: spring-petclinic
+          labels:
+            app: spring-petclinic
+        spec:
+          replicas: 2
+          selector:
+            matchLabels:
+              app: spring-petclinic
+          template:
+            metadata:
+              labels:
+                app: spring-petclinic
+            spec:
+              containers:
+              - name: spring-petclinic
+                image: ${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }}
+                ports:
+                - containerPort: 8080
+                env:
+                - name: SPRING_PROFILES_ACTIVE
+                  value: "h2"
+                livenessProbe:
+                  httpGet:
+                    path: /actuator/health
+                    port: 8080
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                readinessProbe:
+                  httpGet:
+                    path: /actuator/health
+                    port: 8080
+                  initialDelaySeconds: 15
+                  periodSeconds: 5
+        ---
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: spring-petclinic-service
+        spec:
+          selector:
+            app: spring-petclinic
+          ports:
+          - port: 80
+            targetPort: 8080
+          type: LoadBalancer
+        EOF
+
+        # Create deployment info
+        cat > deployment-package/deployment-info.json << EOF
+        {
+          "application": "Spring PetClinic",
+          "version": "${{ needs.setup-validation.outputs.version }}",
+          "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "commit_sha": "${{ github.sha }}",
+          "branch": "${{ github.ref_name }}",
+          "java_version": "${{ env.JAVA_VERSION }}",
+          "spring_boot_version": "$(./mvnw help:evaluate -Dexpression=spring-boot.version -q -DforceStdout)",
+          "supported_profiles": ["h2", "mysql", "postgres"],
+          "container_image": "${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }}",
+          "jar_file": "$(basename target/spring-petclinic-*.jar)"
+        }
+        EOF
+
+        # Create startup scripts
+        cat > deployment-package/start-h2.sh << 'EOF'
+        #!/bin/bash
+        java -jar spring-petclinic-*.jar --spring.profiles.active=h2
+        EOF
+
+        cat > deployment-package/start-mysql.sh << 'EOF'
+        #!/bin/bash
+        java -jar spring-petclinic-*.jar --spring.profiles.active=mysql \
+          --spring.datasource.url=jdbc:mysql://localhost:3306/petclinic \
+          --spring.datasource.username=petclinic \
+          --spring.datasource.password=petclinic
+        EOF
+
+        chmod +x deployment-package/*.sh
+
+    - name: Create ZIP deployment package
+      run: |
+        cd deployment-package
+        zip -r ../spring-petclinic-${{ needs.setup-validation.outputs.version }}.zip .
+        cd ..
+        sha256sum spring-petclinic-${{ needs.setup-validation.outputs.version }}.zip > \
+          spring-petclinic-${{ needs.setup-validation.outputs.version }}.zip.sha256
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.APP_NAME }}-jar-${{ github.run_number }}
+        path: target/*.jar
+        retention-days: 90
+
+    - name: Upload deployment package
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.APP_NAME }}-deployment-${{ github.run_number }}
+        path: |
+          spring-petclinic-${{ needs.setup-validation.outputs.version }}.zip
+          spring-petclinic-${{ needs.setup-validation.outputs.version }}.zip.sha256
+        retention-days: 90
+
+  # Job 6: Container Build and Registry Push
+  # container-build:
+  #   name: Container Build & Push
+  #   runs-on: ubuntu-latest
+  #   needs: [setup-validation, build-package, integration-tests]
+  #   if: success() && needs.setup-validation.outputs.should-deploy == 'true'
+
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
+
+  #   - name: Setup Java JDK
+  #     uses: actions/setup-java@v4
+  #     with:
+  #       java-version: ${{ env.JAVA_VERSION }}
+  #       distribution: 'temurin'
+  #       cache: maven
+
+  #   - name: Restore Maven cache
+  #     uses: actions/cache@v4
+  #     with:
+  #       path: ~/.m2/repository
+  #       key: ${{ needs.setup-validation.outputs.cache-key }}
+  #       restore-keys: |
+  #         petclinic-maven-${{ runner.os }}-
+
+  #   - name: Login to GitHub Container Registry
+  #     uses: docker/login-action@v3
+  #     with:
+  #       registry: ${{ env.REGISTRY_URL }}
+  #       username: ${{ github.actor }}
+  #       password: ${{ secrets.GITHUB_TOKEN }}
+
+  #   - name: Build and push Spring Boot container image
+  #     run: |
+  #       ./mvnw ${{ env.MAVEN_CLI_OPTS }} clean compile spring-boot:build-image \
+  #         -Dspring-boot.build-image.imageName=${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }} \
+  #         -Dspring-boot.build-image.publish=true
+
+  #       # Tag as latest if main branch
+  #       if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+  #         docker tag ${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }} \
+  #                    ${{ env.REGISTRY_URL }}/${{ github.repository }}:latest
+  #         docker push ${{ env.REGISTRY_URL }}/${{ github.repository }}:latest
+  #       fi
+
+  # Job 7: Security and Performance Testing
+  # security-performance:
+  #   name: Security & Performance Tests
+  #   runs-on: ubuntu-latest
+  #   needs: [setup-validation, build-package]
+  #   if: success()
+
+  #   steps:
+  #   - name: Checkout code
+  #     uses: actions/checkout@v4
+
+  #   - name: Setup Java JDK
+  #     uses: actions/setup-java@v4
+  #     with:
+  #       java-version: ${{ env.JAVA_VERSION }}
+  #       distribution: 'temurin'
+  #       cache: maven
+
+  #   - name: Restore Maven cache
+  #     uses: actions/cache@v4
+  #     with:
+  #       path: ~/.m2/repository
+  #       key: ${{ needs.setup-validation.outputs.cache-key }}
+  #       restore-keys: |
+  #         petclinic-maven-${{ runner.os }}-
+
+  #   - name: OWASP Dependency Check
+  #     run: |
+  #       ./mvnw ${{ env.MAVEN_CLI_OPTS }} dependency-check:check \
+  #         -DfailBuildOnCVSS=8 \
+  #         -DskipTestScope=true
+  #     continue-on-error: true
+
+  #   - name: Download built JAR for testing
+  #     uses: actions/download-artifact@v4
+  #     with:
+  #       name: ${{ env.APP_NAME }}-jar-${{ github.run_number }}
+  #       path: ./target
+
+  #   - name: Start application for security testing
+  #     run: |
+  #       java -jar target/spring-petclinic-*.jar --spring.profiles.active=h2 > app.log 2>&1 &
+  #       echo $! > app.pid
+        
+  #       # Wait for application to start
+  #       timeout 120 bash -c 'until curl -f http://localhost:8080/actuator/health; do sleep 2; done'
+
+  #   - name: Run OWASP ZAP security scan
+  #     uses: zaproxy/action-baseline@v0.10.0
+  #     with:
+  #       target: 'http://localhost:8080'
+  #       rules_file_name: '.zap/rules.tsv'
+  #       cmd_options: '-a'
+  #     continue-on-error: true
+
+  #   - name: Stop application
+  #     if: always()
+  #     run: |
+  #       if [ -f app.pid ]; then
+  #         kill $(cat app.pid) || true
+  #         rm app.pid
+  #       fi
+
+  #   - name: Upload security reports
+  #     uses: actions/upload-artifact@v4
+  #     if: always()
+  #     with:
+  #       name: ${{ env.APP_NAME }}-security-reports-${{ github.run_number }}
+  #       path: |
+  #         target/dependency-check-report.html
+  #         report_html.html
+  #         report_json.json
+  #       retention-days: 30
+
+  # Job 8: Deploy to Staging
+  # deploy-staging:
+  #   name: Deploy to Staging
+  #   runs-on: ubuntu-latest
+  #   needs: [setup-validation, container-build, security-performance]
+  #   if: success() && (github.ref == 'refs/heads/develop' || inputs.deploy_environment == 'staging')
+  #   environment: staging
+
+  #   steps:
+  #   - name: Download deployment package
+  #     uses: actions/download-artifact@v4
+  #     with:
+  #       name: ${{ env.APP_NAME }}-deployment-${{ github.run_number }}
+
+  #   - name: Deploy Spring PetClinic to staging
+  #     run: |
+  #       echo "🚀 Deploying Spring PetClinic to staging..."
+  #       echo "Version: ${{ needs.setup-validation.outputs.version }}"
+  #       echo "Container: ${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }}"
+  #       echo "Database Profile: ${{ inputs.database_profile || 'h2' }}"
+        
+  #       # Extract deployment package
+  #       unzip spring-petclinic-${{ needs.setup-validation.outputs.version }}.zip
+        
+  #       # Example deployment commands (customize based on your infrastructure)
+  #       # kubectl apply -f k8s/
+  #       # docker-compose -f docker-compose-${{ inputs.database_profile || 'mysql' }}.yml up -d
+  #       # helm upgrade --install petclinic ./helm-chart --set image.tag=${{ needs.setup-validation.outputs.version }}
+
+  #   - name: Health check staging deployment
+  #     run: |
+  #       echo "🔍 Performing health checks..."
+  #       # Add health check commands for your staging environment
+  #       # curl -f https://staging.petclinic.example.com/actuator/health
+
+  # Job 9: Deploy to Production
+  # deploy-production:
+  #   name: Deploy to Production
+  #   runs-on: ubuntu-latest
+  #   needs: [setup-validation, container-build, security-performance]
+  #   if: success() && (github.ref == 'refs/heads/main' || inputs.deploy_environment == 'production') && github.event_name != 'pull_request'
+  #   environment: production
+
+  #   steps:
+  #   - name: Download deployment package
+  #     uses: actions/download-artifact@v4
+  #     with:
+  #       name: ${{ env.APP_NAME }}-deployment-${{ github.run_number }}
+
+  #   - name: Deploy Spring PetClinic to production
+  #     run: |
+  #       echo "🚀 Deploying Spring PetClinic to production..."
+  #       echo "Version: ${{ needs.setup-validation.outputs.version }}"
+  #       echo "Container: ${{ env.REGISTRY_URL }}/${{ github.repository }}:${{ needs.setup-validation.outputs.version }}"
+        
+  #       # Extract and deploy
+  #       unzip spring-petclinic-${{ needs.setup-validation.outputs.version }}.zip
+        
+  #       # Production deployment commands
+  #       echo "Production deployment would happen here..."
+
+  # Job 10: Post-Deployment Testing
+  post-deployment-tests:
+    # name: Post-Deployment Tests
+    # runs-on: ubuntu-latest
+    # needs: [deploy-staging]
+    # if: success()
+
+    # steps:
+    # - name: Checkout for test scripts
+    #   uses: actions/checkout@v4
+
+    # - name: Setup Node.js for API testing
+    #   uses: actions/setup-node@v4
+    #   with:
+    #     node-version: ${{ env.NODE_VERSION }}
+
+    # - name: Install testing dependencies
+    #   run: |
+    #     npm install -g newman
+    #     # Install any other testing tools
+
+    # - name: Run API smoke tests
+    #   run: |
+    #     echo "🧪 Running post-deployment API tests..."
+    #     # newman run postman/petclinic-api-tests.json --env-var baseUrl=https://staging.petclinic.example.com
+
+    # - name: Run UI tests
+    #   run: |
+    #     echo "🖥️ Running UI smoke tests..."
+    #     # Add UI testing commands (Playwright, Cypress, etc.)
+
+  # Job 11: Notification and Cleanup
+  # notify-cleanup:
+  #   name: Notifications & Cleanup
+  #   runs-on: ubuntu-latest
+  #   needs: [deploy-staging, deploy-production, post-deployment-tests]
+  #   if: always()
+
+  #   steps:
+  #   - name: Send deployment notification
+  #     if: secrets.TEAMS_WEBHOOK_URL != ''
+  #     run: |
+  #       curl -H "Content-Type: application/json" -d '{
+  #         "text": "Spring PetClinic Deployment",
+  #         "sections": [{
+  #           "activityTitle": "Deployment Status: ${{ job.status }}",
+  #           "activitySubtitle": "Version: ${{ needs.setup-validation.outputs.version }}",
+  #           "facts": [
+  #             {"name": "Repository", "value": "${{ github.repository }}"},
+  #             {"name": "Branch", "value": "${{ github.ref_name }}"},
+  #             {"name": "Environment", "value": "${{ inputs.deploy_environment || 'staging' }}"},
+  #             {"name": "Database", "value": "${{ inputs.database_profile || 'h2' }}"}
+  #           ]
+  #         }]
+  #       }' ${{ secrets.TEAMS_WEBHOOK_URL }}
+
+  #   - name: Report deployment status
+  #     run: |
+  #       if [ "${{ job.status }}" == "success" ]; then
+  #         echo "✅ Spring PetClinic pipeline completed successfully!"
+  #       else
+  #         echo "❌ Spring PetClinic pipeline failed!"
+  #       fi
+        
+  #       echo "📊 Pipeline Summary:"
+  #       echo "- Version: ${{ needs.setup-validation.outputs.version }}"
+  #       echo "- Java Version: ${{ env.JAVA_VERSION }}"
+  #       echo "- Database Profile: ${{ inputs.database_profile || 'h2' }}"
+  #       echo "- Environment: ${{ inputs.deploy_environment || 'staging' }}"
