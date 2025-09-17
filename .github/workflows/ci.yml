@@ -381,11 +381,18 @@ jobs:
         key: ${{ needs.setup-validation.outputs.cache-key }}
         restore-keys: |
           petclinic-maven-${{ runner.os }}-
+    - name: Verify version string
+      run: |
+        if [ -z "${{ needs.setup-validation.outputs.version }}" ]; then
+          echo "Version not set – stopping build"; exit 1;
+        fi
 
     - name: Set application version
+      env:
+       PROJECT_VERSION: ${{ needs.setup-validation.outputs.version }}
       run: |
         ./mvnw ${{ env.MAVEN_CLI_OPTS }} versions:set \
-          -DnewVersion=${{ needs.setup-validation.outputs.version }} \
+          -DnewVersion="${ PROJECT_VERSION }" \
           -DgenerateBackupPoms=false
 
     - name: Compile CSS resources
