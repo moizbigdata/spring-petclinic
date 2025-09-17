@@ -1,14 +1,14 @@
 name: Spring PetClinic CI/CD Pipeline
 
 on:
-  push:
-    branches: 
-      - main
-      - develop
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'readme/**'
+  # push:
+  #   branches: 
+  #     - main
+  #     - develop
+  #   paths-ignore:
+  #     - '**.md'
+  #     - 'docs/**'
+  #     - 'readme/**'
   pull_request:
     branches: [main]
     paths-ignore:
@@ -95,15 +95,15 @@ jobs:
         ./mvnw ${{ env.MAVEN_CLI_OPTS }} dependency:tree
         ./mvnw ${{ env.MAVEN_CLI_OPTS }} help:active-profiles
 
-    - name: Generate application version
-      id: version
-      run: |
-        if [[ "${{ github.event_name }}" == "release" ]]; then
-          echo "version=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
-        else
-          VERSION=$(./mvnw ${{ env.MAVEN_CLI_OPTS }} help:evaluate -Dexpression=project.version -q -DforceStdout)
-          echo "version=${VERSION}-${{ github.run_number }}" >> $GITHUB_OUTPUT
-        fi
+    # - name: Generate application version
+    #   id: version
+    #   run: |
+    #     if [[ "${{ github.event_name }}" == "release" ]]; then
+    #       echo "version=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+    #     else
+    #       VERSION=$(./mvnw ${{ env.MAVEN_CLI_OPTS }} help:evaluate -Dexpression=project.version -q -DforceStdout)
+    #       echo "version=${VERSION}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+    #     fi
 
     - name: Check deployment conditions
       id: check-deploy
