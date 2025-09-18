@@ -194,16 +194,16 @@ jobs:
           -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
       continue-on-error: true
 
-    # - name: Upload code analysis results
-    #   uses: actions/upload-artifact@v4
-    #   if: always()
-    #   with:
-    #     name: ${{ env.APP_NAME }}-code-analysis-${{ github.run_number }}
-    #     path: |
-    #       target/checkstyle-result.xml
-    #       target/spotbugsXml.xml
-    #       target/site/jacoco/
-    #     retention-days: 30
+    - name: Upload code analysis results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ${{ env.APP_NAME }}-code-analysis-${{ github.run_number }}
+        path: |
+          target/checkstyle-result.xml
+          target/spotbugsXml.xml
+          target/site/jacoco/
+        retention-days: 30
 
   # Job 3: Unit Tests with Multiple Database Profiles
   unit-tests:
