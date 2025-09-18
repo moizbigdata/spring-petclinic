@@ -278,6 +278,25 @@
         <groupId>org.cyclonedx</groupId>
         <artifactId>cyclonedx-maven-plugin</artifactId>
       </plugin>
+      <plugin>
+      <groupId>com.github.spotbugs</groupId>
+      <artifactId>spotbugs-maven-plugin</artifactId>
+      <version>4.8.2.0</version>
+      <executions>
+        <execution>
+          <phase>verify</phase>
+          <goals>
+            <goal>spotbugs</goal>
+          </goals>
+        </execution>
+      </executions>
+      <configuration>
+        <!-- Fail the build on high priority bugs -->
+        <effort>Max</effort>
+        <threshold>High</threshold>
+        <xmlOutput>true</xmlOutput>
+      </configuration>
+    </plugin>
 
     </plugins>
   </build>
