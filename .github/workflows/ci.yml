@@ -183,16 +183,16 @@ jobs:
         ./mvnw ${{ env.MAVEN_CLI_OPTS }} spotbugs:spotbugs
       continue-on-error: true
 
-    # - name: SonarCloud Scan
-    #   if: github.actor != 'dependabot[bot]' && secrets.SONAR_TOKEN != ''
-    #   run: |
-    #     ./mvnw ${{ env.MAVEN_CLI_OPTS }} verify sonar:sonar \
-    #       -Dsonar.projectKey=spring-petclinic_${{ github.event.repository.name }} \
-    #       -Dsonar.organization=${{ github.repository_owner }} \
-    #       -Dsonar.host.url=https://sonarcloud.io \
-    #       -Dsonar.token=${{ secrets.SONAR_TOKEN }} \
-    #       -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
-    #   continue-on-error: true
+    - name: SonarCloud Scan
+      if: github.actor != 'dependabot[bot]' && secrets.SONAR_TOKEN != ''
+      run: |
+        ./mvnw ${{ env.MAVEN_CLI_OPTS }} verify sonar:sonar \
+          -Dsonar.projectKey=spring-petclinic_${{ github.event.repository.name }} \
+          -Dsonar.organization=${{ github.repository_owner }} \
+          -Dsonar.host.url=http://98.87.16.0:9000 \
+          -Dsonar.token=${{ secrets.SONAR_TOKEN }} \
+          -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+      continue-on-error: true
 
     # - name: Upload code analysis results
     #   uses: actions/upload-artifact@v4
