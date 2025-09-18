@@ -184,7 +184,6 @@ jobs:
       continue-on-error: true
 
     - name: SonarCloud Scan
-      if: github.actor != 'dependabot[bot]' && secrets.SONAR_TOKEN != ''
       run: |
         ./mvnw ${{ env.MAVEN_CLI_OPTS }} verify sonar:sonar \
           -Dsonar.projectKey=spring-petclinic_${{ github.event.repository.name }} \
